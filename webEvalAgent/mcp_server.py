@@ -6,6 +6,7 @@ import argparse
 import traceback
 import uuid
 from enum import Enum
+import subprocess
 from webEvalAgent.src.utils import stop_log_server
 from webEvalAgent.src.log_server import send_log
 
@@ -42,6 +43,19 @@ class BrowserTools(str, Enum):
 parser = argparse.ArgumentParser(description='Run the MCP server with browser debugging capabilities')
 args = parser.parse_args()
 
+def ensure_playwright_browsers():
+    """Checks and installs Playwright browsers if necessary."""
+    try:
+        process = subprocess.run(["playwright", "install", "--with-deps"], capture_output=True, text=True, check=False, timeout=300)
+        if process.returncode != 0 and process.stderr:
+            print(f"Warning: Playwright browser installation may have failed: {process.stderr}")
+    except FileNotFoundError:
+        print("Warning: Playwright command not found. Browsers may not be installed.")
+    except subprocess.TimeoutExpired:
+        print("Warning: Playwright browser installation timed out.")
+    except Exception as e:
+        print(f"Warning: Error during Playwright browser installation: {e}")
+
 # Get API key from environment variable
 api_key = os.environ.get('OPERATIVE_API_KEY')
 
@@ -52,6 +66,9 @@ if api_key:
         print("Error: Invalid API key. Please provide a valid OperativeAI API key in the OPERATIVE_API_KEY environment variable.")
 else:
     print("Error: No API key provided. Please set the OPERATIVE_API_KEY environment variable.")
+
+# Ensure playwright browsers are installed
+ensure_playwright_browsers()
 
 @mcp.tool(name=BrowserTools.WEB_EVAL_AGENT)
 async def web_eval_agent(url: str, task: str, ctx: Context, headless_browser: bool = False) -> list[TextContent]:
