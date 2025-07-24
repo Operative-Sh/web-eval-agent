@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 
 import asyncio
-# import json  # Not needed for CUA version
+import json
 import logging
 import uuid
 import warnings
 import os
 from typing import Dict, Any, List, Optional
 from collections import deque
-# import pathlib  # Not needed for CUA version
+import pathlib  # Added for file reading
 
 # Import log server function
 from .log_server import send_log
@@ -23,15 +23,21 @@ from playwright.async_api import (
 # Local imports (assuming browser_manager is potentially still used for singleton logic elsewhere, or can be removed if fully replaced)
 # from browser_manager import PlaywrightBrowserManager # Commented out if not needed
 
-# CUA integration import
-from .cua_integration import OpenAICUA, CUAConfig
+# Browser-use imports
+from browser_use.agent.service import Agent
+from browser_use.browser.browser import Browser, BrowserConfig
+from browser_use.browser.context import BrowserContext  # Import BrowserContext
+
+# Langchain/MCP imports
+from langchain_anthropic import ChatAnthropic
+from langchain.globals import set_verbose
 
 # Original method will be stored here
 _original_bring_to_front = None
 
 
 # This prevents the browser window from stealing focus during execution.
-async def _no_bring_to_front(*args, **kwargs):
+async def _no_bring_to_front(self, *args, **kwargs):
     return None
 
 
@@ -307,13 +313,97 @@ def handle_request_failed(error):
     asyncio.create_task(_handle_request_failed(error))
 
 
-# Agent overlay not needed for CUA - removed AGENT_CONTROL_OVERLAY_JS
+# Read the JavaScript overlay code from the file
+try:
+    overlay_js_path = pathlib.Path(__file__).parent / "agent_overlay.js"
+    AGENT_CONTROL_OVERLAY_JS = overlay_js_path.read_text(encoding="utf-8")
+except Exception as e:
+    send_log(
+        f"CRITICAL ERROR: Failed to read agent_overlay.js: {e}", "🚨", log_type="status"
+    )
+    AGENT_CONTROL_OVERLAY_JS = (
+        "console.error('Failed to load agent overlay script');"  # Fallback
+    )
 
 
-# inject_agent_control_overlay function removed - not needed for CUA
+# Function to inject the agent control overlay into a page
+async def inject_agent_control_overlay(page: PlaywrightPage):
+    """Inject the agent control overlay into a page."""
+    e1 = None
+    e2 = None
+    try:
+        # First try with evaluate
+        try:
+            await page.evaluate(AGENT_CONTROL_OVERLAY_JS)
+            return True
+        except Exception as exc1:
+            e1 = exc1
+            send_log(
+                f"Failed to inject with page.evaluate(): {e1}", "⚠️", log_type="status"
+            )
+        # Try with add_script_tag as fallback
+        try:
+            await page.add_script_tag(content=AGENT_CONTROL_OVERLAY_JS)
+            return True
+        except Exception as exc2:
+            e2 = exc2
+            send_log(
+                f"Failed to inject with page.add_script_tag(): {e2}",
+                "⚠️",
+                log_type="status",
+            )
+        # Try with evaluate_handle as last resort
+        try:
+            await page.evaluate_handle(f"() => {{ {AGENT_CONTROL_OVERLAY_JS} }}")
+            return True
+        except Exception as e3:
+            send_log(
+                f"Failed to inject with page.evaluate_handle(): {e3}",
+                "⚠️",
+                log_type="status",
+            )
+            raise Exception(f"All injection methods failed: {e1}, {e2}, {e3}")
+    except Exception as e:
+        send_log(
+            f"Failed to inject agent control overlay: {e}", "❌", log_type="status"
+        )
+        raise
 
 
-# setup_page_agent_controls function removed - not needed for CUA
+# Function to set up agent control functions for a page
+async def setup_page_agent_controls(page: PlaywrightPage):
+    """Set up agent control functions for a page."""
+    global agent_instance
+
+    try:
+        # Expose agent control functions to the page
+        await page.expose_function("pauseAgent", lambda: pause_agent())
+        await page.expose_function("resumeAgent", lambda: resume_agent())
+        await page.expose_function("stopAgent", lambda: stop_agent())
+        await page.expose_function("getAgentState", lambda: get_agent_state())
+
+        # Add navigation listener to re-inject overlay after navigation
+        async def handle_frame_navigation(frame):
+            if frame is page.main_frame:
+                send_log(f"Page navigated to: {page.url}", "🧭", log_type="status")
+
+        # Define async wrapper functions for event listeners
+        page.on(
+            "framenavigated",
+            lambda frame: asyncio.create_task(handle_frame_navigation(frame)),
+        )
+        send_log("Added navigation listener to page", "🔄", log_type="status")
+
+        # Also listen for load events to re-inject the overlay
+        async def handle_load():
+            send_log(f"Page load event on: {page.url}", "🔄", log_type="status")
+            await asyncio.sleep(0.5)  # Wait a bit for the page to stabilize
+
+        page.on("load", lambda: asyncio.create_task(handle_load()))
+        send_log("Added load event listener to page", "🔄", log_type="status")
+
+    except Exception as e:
+        send_log(f"Failed to set up agent controls: {e}", "❌", log_type="status")
 
 
 # Agent control functions
@@ -653,16 +743,15 @@ async def run_browser_task(
     # Store the current asyncio loop for input handling
     browser_task_loop = asyncio.get_running_loop()
     """
-    Run a task using OpenAI CUA (Computer-Using Agent), sending logs to the dashboard.
+    Run a task using browser-use agent, sending logs to the dashboard.
 
     Args:
         task: The task to run.
         tool_call_id: The tool call ID for API headers.
         api_key: The API key for authentication.
-        headless: Whether to run the browser in headless mode.
 
     Returns:
-        Dict[str, Any]: Result dictionary with 'result' and 'screenshots' keys.
+        str: Agent's final result (stringified).
     """
     global \
         agent_instance, \
@@ -684,7 +773,10 @@ async def run_browser_task(
     # Local Playwright variables for this run
     playwright = None
     playwright_browser = None
-    # No browser-use specific variables needed for CUA
+    agent_browser = None  # browser-use Browser instance
+    local_original_create_context = (
+        None  # To store original method for this run's finally block
+    )
 
     # Configure logging suppression
     logging.basicConfig(level=logging.CRITICAL)  # Set root logger level first
@@ -695,7 +787,7 @@ async def run_browser_task(
         current_logger.setLevel(logging.CRITICAL)
 
     warnings.filterwarnings("ignore", category=UserWarning)
-    # set_verbose(False)  # Not needed for CUA
+    set_verbose(False)
 
     try:
         # Apply the patch to prevent focus stealing
@@ -727,10 +819,15 @@ async def run_browser_task(
                 log_type="status",
             )
 
-        # --- Initialize browser context instead of browser-use Browser ---
-        # We'll use Playwright directly for CUA
+        # --- Create browser-use Browser ---
+        browser_config = BrowserConfig(
+            disable_security=True, headless=headless, cdp_url="http://127.0.0.1:9222"
+        )
+        agent_browser = Browser(config=browser_config)
+        agent_browser.playwright = playwright
+        agent_browser.playwright_browser = playwright_browser
         send_log(
-            "Using Playwright directly for CUA integration.",
+            "Linked Playwright to agent browser with CDP enabled.",
             "🔗",
             log_type="status",
         )  # Type: status
@@ -903,8 +1000,91 @@ async def run_browser_task(
             send_log(f"Failed to start CDP screencast: {e}", "❌", log_type="status")
             import traceback
 
-        # --- No need to patch BrowserContext for CUA ---
-        # CUA will handle context creation directly
+        # --- Patch BrowserContext._create_context ---
+        # Store original only if not already stored (first run)
+        if original_create_context is None:
+            original_create_context = BrowserContext._create_context
+            local_original_create_context = (
+                original_create_context  # Also store for finally block
+            )
+        else:
+            # Already patched, just ensure we have a reference for finally
+            local_original_create_context = original_create_context
+
+        async def patched_create_context(self, browser_pw):
+            if original_create_context is None:
+                raise RuntimeError("Original _create_context not stored correctly")
+
+            # Check for persisted browser state
+            persisted_state = _get_persisted_state()
+            if persisted_state:
+                send_log(
+                    "Loading persisted browser state in new context",
+                    "💾",
+                    log_type="status",
+                )
+
+            # Call the original method but with storage_state if available
+            raw_playwright_context = await original_create_context(self, browser_pw)
+
+            # Apply storage state after context creation if available
+            if persisted_state and raw_playwright_context:
+                try:
+                    with open(persisted_state, "r") as f:
+                        state_data = json.load(f)
+
+                    # Load cookies and localStorage from state
+                    if "cookies" in state_data:
+                        await raw_playwright_context.add_cookies(state_data["cookies"])
+
+                    # Origins with storage set is already handled by Playwright internally
+                    send_log(
+                        "Applied persisted browser state to context",
+                        "💾",
+                        log_type="status",
+                    )
+                except Exception as e:
+                    send_log(
+                        f"Failed to apply persisted state to context: {e}",
+                        "⚠️",
+                        log_type="status",
+                    )
+
+            if raw_playwright_context:
+                # Use the non-async wrapper functions for event listeners
+                raw_playwright_context.on("console", handle_console_message)
+                raw_playwright_context.on("request", handle_request)
+                raw_playwright_context.on("requestfailed", handle_request_failed)
+                raw_playwright_context.on("response", handle_response)
+                raw_playwright_context.on("weberror", handle_web_error)
+                raw_playwright_context.on("pageerror", handle_page_error)
+
+                # Set up agent controls for existing pages
+                for page in raw_playwright_context.pages:
+                    await setup_page_agent_controls(page)
+
+                # Define non-async wrapper function for page event
+                def on_page(page):
+                    asyncio.create_task(setup_page_agent_controls(page))
+
+                # Set up agent controls for new pages using non-async wrapper
+                raw_playwright_context.on("page", on_page)
+
+                send_log(
+                    "Log listeners and agent controls attached.",
+                    "👂",
+                    log_type="status",
+                )  # Type: status
+            else:
+                send_log(
+                    "Original _create_context did not return a context.",
+                    "⚠️",
+                    log_type="status",
+                )  # Type: status
+
+            return raw_playwright_context
+
+        BrowserContext._create_context = patched_create_context
 
         # --- Ensure Tool Call ID ---
         if tool_call_id is None:
@@ -913,53 +1093,119 @@ async def run_browser_task(
                 f"Generated tool_call_id: {tool_call_id}", "🆔", log_type="status"
             )  # Type: status
 
-        # --- CUA Setup ---
-        # Initialize CUA configuration
-        cua_config = CUAConfig(
-            display_width=1920,
-            display_height=1080,
-            environment="browser",
-            reasoning_summary="concise",
-            max_iterations=30,
-            timeout_seconds=300
+        # --- LLM Setup ---
+        from .env_utils import get_backend_url
+
+        llm = ChatAnthropic(
+            model="claude-3-5-sonnet-20240620",
+            base_url=get_backend_url("v1beta/models/claude-3-5-sonnet-20240620"),
+            extra_headers={
+                "x-operative-api-key": api_key,
+                "x-operative-tool-call-id": tool_call_id,
+            },
         )
-        
-        # Create CUA instance
-        cua = OpenAICUA(api_key=api_key, config=cua_config, tool_call_id=tool_call_id)
         send_log(
-            "OpenAI CUA configured.", "🤖", log_type="status"
+            f"LLM ({llm.model}) configured.", "🤖", log_type="status"
         )  # Type: status
 
-        # --- No agent callback needed for CUA ---
-        # CUA handles its own step tracking and screenshot capture
+        # --- Agent Callback ---
+        async def state_callback(browser_state, agent_output, step_number):
+            global agent_instance, screenshot_storage  # Ensure we have access to the agent and screenshot storage
 
-        # --- Initialize browser page for CUA ---
-        # Create the main page from the existing context
-        main_page = first_page  # Use the page we already created
-        
-        # Initialize CUA with the browser page
-        await cua.initialize_browser(main_page)
-        
-        # Extract URL from task if present
-        initial_url = None
-        if "http" in task.lower():
-            import re
-            url_pattern = r'https?://[^\s]+'
-            urls = re.findall(url_pattern, task)
-            if urls:
-                initial_url = urls[0]
-                send_log(f"Extracted URL from task: {initial_url}", "🔗", log_type="status")
-        
-        # --- Run CUA Task ---
-        send_log(f"CUA starting task: {task}", "🏃", log_type="agent")  # Type: agent
-        cua_result = await cua.run_task(task, initial_url=initial_url)
-        send_log("CUA run finished.", "🏁", log_type="agent")  # Type: agent
-        
-        # --- Store CUA screenshots ---
-        screenshot_storage.extend(cua_result.get("screenshots", []))
-        
+            # Send agent output with type 'agent'
+            send_log(f"Step {step_number}", "📍", log_type="agent")
+            send_log(f"URL: {browser_state.url}", "🔗", log_type="agent")
+
+            # Capture screenshot at each step
+            try:
+                if agent_instance and agent_instance.browser_context:
+                    # Use the provided helper method to get the current page
+                    current_page = (
+                        await agent_instance.browser_context.get_current_page()
+                    )
+
+                    if current_page:
+                        # Take screenshot
+                        screenshot_bytes = await current_page.screenshot(
+                            type="jpeg", quality=80
+                        )
+                        screenshot_base64 = base64.b64encode(screenshot_bytes).decode(
+                            "utf-8"
+                        )
+
+                        # Log screenshot size for debugging
+                        send_log(
+                            f"Screenshot captured: {len(screenshot_bytes)} bytes, {len(screenshot_base64)} base64 chars",
+                            "📊",
+                            log_type="status",
+                        )
+
+                        # Store screenshot with metadata
+                        screenshot_storage.append(
+                            {
+                                "step": step_number,
+                                "url": browser_state.url,
+                                "timestamp": asyncio.get_event_loop().time(),
+                                "screenshot": screenshot_base64,
+                            }
+                        )
+
+                        send_log(
+                            f"Screenshot stored in storage (total: {len(screenshot_storage)})",
+                            "📸",
+                            log_type="status",
+                        )
+
+                        # Re-inject the overlay
+                        send_log(
+                            f"Re-injecting overlay after step {step_number} into page {current_page.url}",
+                            "🔄",
+                            log_type="status",
+                        )
+                    else:
+                        send_log(
+                            f"Could not get current page from agent context for step {step_number}",
+                            "⚠️",
+                            log_type="status",
+                        )
+                else:
+                    send_log(
+                        f"Agent instance or browser context not available for step {step_number}",
+                        "⚠️",
+                        log_type="status",
+                    )
+
+            except Exception as e:
+                # Add traceback for debugging other potential errors
+                import traceback
+
+                tb_str = traceback.format_exc()
+                send_log(
+                    f"Failed to capture screenshot or re-inject overlay after step: {e}\n{tb_str}",
+                    "⚠️",
+                    log_type="status",
+                )
+
+            # Ensure agent_output is a string before logging
+            output_str = str(agent_output)
+            send_log(f"Agent Output: {output_str}", "💬", log_type="agent")
+
+        # --- Initialize and Run Agent ---
+        agent = Agent(
+            task=task,
+            llm=llm,
+            browser=agent_browser,
+            register_new_step_callback=state_callback,
+        )
+        agent_instance = agent
+
+        send_log(f"Agent starting task: {task}", "🏃", log_type="agent")  # Type: agent
+        agent_result = await agent.run()
+        send_log("Agent run finished.", "🏁", log_type="agent")  # Type: agent
+
         # --- Prepare Combined Results ---
-        serialized_result = cua_result.get("result", "Task completed")
+        # Convert AgentHistoryList to a serializable format (just stringify)
+        serialized_result = str(agent_result)
 
         # Log information about screenshots before returning
         send_log(
@@ -1002,13 +1248,19 @@ async def run_browser_task(
         if _original_bring_to_front:
             PlaywrightPage.bring_to_front = _original_bring_to_front
 
-        # No BrowserContext patch to restore for CUA
-
-        # Close browser resources
-        if playwright_browser:
-            await playwright_browser.close()
+        # Ensure patch is restored
+        if local_original_create_context:
+            BrowserContext._create_context = local_original_create_context
             send_log(
-                "Browser resources cleaned up.", "🧹", log_type="status"
+                "Original BrowserContext restored.", "🔧", log_type="status"
+            )  # Type: status
+
+        # Close the browser created specifically for this task
+        if agent_browser:
+            await agent_browser.close()
+            agent_browser = None
+            send_log(
+                "Agent browser resources cleaned up.", "🧹", log_type="status"
             )  # Type: status
         # Close the playwright instance started for this task
         if playwright:
