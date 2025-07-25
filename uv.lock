@@ -1624,7 +1624,7 @@ requires-dist = [
     { name = "langchain", specifier = ">=0.3.21" },
     { name = "langchain-anthropic", specifier = ">=0.3.3" },
     { name = "langchain-google-genai", specifier = ">=2.0.10" },
-    { name = "mcp", specifier = ">=1.6.0" },
+    { name = "mcp", specifier = "==1.6.0" },
     { name = "playwright", specifier = ">=1.41.0" },
     { name = "python-dotenv", specifier = ">=1.1.0" },
     { name = "ruff", specifier = ">=0.11.9" },

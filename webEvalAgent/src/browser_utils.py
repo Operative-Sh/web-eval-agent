@@ -13,6 +13,8 @@ import pathlib  # Added for file reading
 # Import log server function
 from .log_server import send_log
 
+# USE_MODE will be checked at runtime in run_browser_task
+
 # Import Playwright types
 from playwright.async_api import (
     async_playwright,
@@ -739,9 +741,65 @@ def _get_persisted_state() -> Optional[str]:
 async def run_browser_task(
     task: str, tool_call_id: str = None, api_key: str = None, headless: bool = True
 ) -> Dict[str, Any]:
-    global browser_task_loop, screenshot_task
-    # Store the current asyncio loop for input handling
+    """Run a task using either browser-use agent or OpenAI CUA based on USE_MODE"""
+    
+    # Check which mode to use at runtime
+    use_mode = os.getenv("USE_MODE", "browser_use")
+    send_log(f"Browser task mode: {use_mode}", "🔧", log_type="status")
+    
+    if use_mode == "openai_cua":
+        return await run_cua_task(task, tool_call_id, api_key, headless)
+    else:
+        return await run_browser_use_task(task, tool_call_id, api_key, headless)
+
+
+async def run_cua_task(
+    task: str, tool_call_id: str = None, api_key: str = None, headless: bool = True
+) -> Dict[str, Any]:
+    """Run a task using OpenAI Computer Use Agent"""
+    
+    global browser_task_loop, screenshot_storage
     browser_task_loop = asyncio.get_running_loop()
+    
+    # Clear storages
+    console_log_storage.clear()
+    network_request_storage.clear()
+    screenshot_storage.clear()
+    
+    try:
+        send_log(f"Starting OpenAI CUA task", "🤖", log_type="agent")
+        
+        # Use the OpenAI API key from environment
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+        if not openai_api_key:
+            raise ValueError("OPENAI_API_KEY not set in environment")
+            
+        # Import and run the OpenAI CUA implementation
+        from .openai_cua import run_openai_cua_task
+        
+        # Run the task using OpenAI CUA
+        result = await run_openai_cua_task(task, openai_api_key)
+        
+        # Update screenshot storage from result
+        if isinstance(result, dict) and "screenshots" in result:
+            screenshot_storage.extend(result["screenshots"])
+            
+        return result
+        
+    except Exception as e:
+        import traceback
+        error_message = f"Error in run_cua_task: {e}\n{traceback.format_exc()}"
+        send_log(error_message, "❌", log_type="status")
+        return {"result": error_message, "screenshots": screenshot_storage}
+        
+    finally:
+        browser_task_loop = None
+        send_log("CUA task completed", "🧹", log_type="status")
+
+
+async def run_browser_use_task(
+    task: str, tool_call_id: str = None, api_key: str = None, headless: bool = True
+) -> Dict[str, Any]:
     """
     Run a task using browser-use agent, sending logs to the dashboard.
 
@@ -759,8 +817,13 @@ async def run_browser_task(
         network_request_storage, \
         screenshot_storage, \
         original_create_context, \
-        _original_bring_to_front
+        _original_bring_to_front, \
+        browser_task_loop, \
+        screenshot_task
     global active_cdp_session, active_screencast_running
+    
+    # Store the current asyncio loop for input handling
+    browser_task_loop = asyncio.get_running_loop()
 
     # Clear screenshot storage for this run
     screenshot_storage.clear()
@@ -777,6 +840,7 @@ async def run_browser_task(
     local_original_create_context = (
         None  # To store original method for this run's finally block
     )
+    screenshot_task = None  # Initialize screenshot_task to None
 
     # Configure logging suppression
     logging.basicConfig(level=logging.CRITICAL)  # Set root logger level first
