@@ -61,7 +61,7 @@ python-dateutil==2.9.0.post0
 python-dotenv==1.1.0
 pyyaml==6.0.2
 regex==2024.11.6
-requests==2.32.3
+requests==2.32.4
 requests-toolbelt==1.0.0
 rsa==4.9
 setuptools==78.1.0
