@@ -49,7 +49,7 @@ packaging==24.2
 playwright==1.51.0
 posthog==3.23.0
 proto-plus==1.26.1
-protobuf==5.29.4
+protobuf==5.29.5
 pyasn1==0.6.1
 pyasn1-modules==0.4.2
 pydantic==2.11.1
