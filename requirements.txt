@@ -40,7 +40,7 @@ langchain-openai==0.3.1
 langchain-text-splitters==0.3.7
 langsmith==0.3.22
 markdownify==0.14.1
-mcp==1.6.0
+mcp==1.10.0
 monotonic==1.6
 ollama==0.4.7
 openai==1.70.0
