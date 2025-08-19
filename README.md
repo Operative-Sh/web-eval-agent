@@ -1,5 +1,6 @@
 # 🚀 operative.sh web-eval-agent MCP Server
 
+[![Trust Score](https://archestra.ai/mcp-catalog/api/badge/quality/Operative-Sh/web-eval-agent)](https://archestra.ai/mcp-catalog/operative-sh__web-eval-agent)
 > *Let the coding agent debug itself, you've got better things to do.*
 
 ![Demo](./demo.gif)
