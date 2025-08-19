@@ -40,7 +40,14 @@ You can trigger these tools straight from your IDE chat, for example:
 Evaluate my app at http://localhost:3000 – run web_eval_agent with the task "Try the full signup flow and report UX issues".
 ```
 
-## 🏁 Quick Start (macOS/Linux)
+## 🏁 Quick Start
+
+### Easy Setup with One-Click Integration
+1. [Get your API key (free)](https://www.operative.sh/mcp) - when you create your API key, you'll see:
+   - **"Add to Cursor"** button with a deeplink for instant Cursor installation
+   - **Prefilled Claude Code command** with your API key automatically included
+
+### Manual Setup (macOS/Linux)
 
 1. Pre-requisites (typically not needed):
  - brew: `/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"`
