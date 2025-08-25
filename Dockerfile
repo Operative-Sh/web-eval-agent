@@ -45,5 +45,5 @@ COPY . .
 # Set environment variable for API key (should be overridden at runtime)
 ENV OPERATIVE_API_KEY="your_api_key_here"
 
-# Run the MCP server
-CMD ["python", "mcp_server.py"]
+# Run the MCP server via the package module
+CMD ["python", "-m", "webEvalAgent.mcp_server"]
