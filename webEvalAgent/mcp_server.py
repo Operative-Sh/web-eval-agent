@@ -49,9 +49,9 @@ api_key = os.environ.get('OPERATIVE_API_KEY')
 if api_key:
     is_valid = asyncio.run(validate_api_key(api_key))
     if not is_valid:
-        send_log("Error: Invalid API key. Please provide a valid OperativeAI API key in the OPERATIVE_API_KEY environment variable.", "❌")
+        print("Error: Invalid API key. Please provide a valid OperativeAI API key in the OPERATIVE_API_KEY environment variable.")
 else:
-    send_log("Error: No API key provided. Please set the OPERATIVE_API_KEY environment variable.", "❌")
+    print("Error: No API key provided. Please set the OPERATIVE_API_KEY environment variable.")
 
 @mcp.tool(name=BrowserTools.WEB_EVAL_AGENT)
 async def web_eval_agent(url: str, task: str, ctx: Context, headless_browser: bool = False) -> list[TextContent]:
@@ -127,7 +127,7 @@ async def setup_browser_state(url: str = None, ctx: Context = None) -> list[Text
     try:
         # Generate a new tool_call_id for this specific tool call
         tool_call_id = str(uuid.uuid4())
-        send_log(f"Generated new tool_call_id for setup_browser_state: {tool_call_id}", "🆔")
+        send_log(f"Generated new tool_call_id for setup_browser_state: {tool_call_id}")
         return await handle_setup_browser_state(
             {"url": url, "tool_call_id": tool_call_id},
             ctx,
